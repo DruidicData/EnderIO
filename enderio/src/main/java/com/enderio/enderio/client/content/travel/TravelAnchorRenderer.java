@@ -239,7 +239,7 @@ public class TravelAnchorRenderer implements TravelRenderer<AnchorTravelTarget> 
             int textBg1 = textBg;
             int textBg2 = 0;
 
-            if (ModCompatHelper.hasIris()) {
+            if (false) { // was ModCompatHelper.hasIris(), see Team-EnderIO/EnderIO#1062
                 // required for text to render correctly, possibly an Iris bug
                 // is there a better way to draw text?
                 var _m = mode1;
