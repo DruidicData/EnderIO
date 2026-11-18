@@ -3,10 +3,12 @@ package com.enderio.enderio.client.content.travel;
 import com.enderio.enderio.api.travel.TravelRenderer;
 import com.enderio.enderio.client.EnderIOClient;
 import com.enderio.enderio.client.foundation.renderer.OutlineBuffer;
+import com.enderio.enderio.client.foundation.renderer.SeeThroughRenderTypes;
 import com.enderio.enderio.compat.ModCompatHelper;
 import com.enderio.enderio.config.base.BaseConfig;
 import com.enderio.enderio.content.travel.travel_anchor.AnchorTravelTarget;
 import com.enderio.enderio.content.travel.travel_anchor.PaintedTravelAnchorBlockEntity;
+import com.mojang.blaze3d.vertex.ByteBufferBuilder;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.mojang.math.Axis;
@@ -60,6 +62,49 @@ public class TravelAnchorRenderer implements TravelRenderer<AnchorTravelTarget> 
         return bakedQuads;
     });
 
+    // Immediate buffers for the see-through overlays used while a shader pack is active.
+    private static final Lazy<MultiBufferSource.BufferSource> SEE_THROUGH_BACKDROP = Lazy.of(
+        () -> MultiBufferSource.immediate(new ByteBufferBuilder(SeeThroughRenderTypes.QUADS.bufferSize())));
+    private static final Lazy<MultiBufferSource.BufferSource> SEE_THROUGH_CONTENT = Lazy.of(
+        () -> MultiBufferSource.immediate(new ByteBufferBuilder(SeeThroughRenderTypes.QUADS.bufferSize())));
+
+    // Sends every render type requested for block models and icons to the see-through quads, dropping enchantment glint.
+    private static final MultiBufferSource SEE_THROUGH_CONTENT_MAPPED = type -> type.toString().contains("glint")
+        ? TravelAnchorRenderer.NO_OP_CONSUMER
+        : SEE_THROUGH_CONTENT.get().getBuffer(SeeThroughRenderTypes.QUADS);
+
+    private static final VertexConsumer NO_OP_CONSUMER = new VertexConsumer() {
+        @Override
+        public VertexConsumer addVertex(float x, float y, float z) {
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setColor(int red, int green, int blue, int alpha) {
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv(float u, float v) {
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv1(int u, int v) {
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv2(int u, int v) {
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setNormal(float normalX, float normalY, float normalZ) {
+            return this;
+        }
+    };
+
     @Override
     public void render(AnchorTravelTarget travelData, LevelRenderer levelRenderer, PoseStack poseStack,
             double distanceSquared, boolean active, float partialTick) {
@@ -91,9 +136,11 @@ public class TravelAnchorRenderer implements TravelRenderer<AnchorTravelTarget> 
         }
 
         // With an Iris shader pack active, anything drawn through the outline buffer still hides what is
-        // behind it but never shows on screen (see #1062), so draw into the normal world buffer instead.
-        // Anchors then no longer show through walls while shaders are on.
-        MultiBufferSource buffer = isShaderPackInUse() ? minecraft.renderBuffers().bufferSource() : OutlineBuffer.INSTANCE;
+        // behind it but never shows on screen (see #1062). Instead, draw backdrops, block models and icons
+        // with no depth test so they still show through walls, and draw text into the normal world buffer.
+        boolean shaders = isShaderPackInUse();
+        MultiBufferSource buffer = shaders ? minecraft.renderBuffers().bufferSource() : OutlineBuffer.INSTANCE;
+        MultiBufferSource contentSource = shaders ? SEE_THROUGH_CONTENT_MAPPED : OutlineBuffer.INSTANCE;
         int outlineColor = 0xFF0B4D42;
         int textColor = 0xFFFFFFFF;
         if (active) {
@@ -104,7 +151,9 @@ public class TravelAnchorRenderer implements TravelRenderer<AnchorTravelTarget> 
         float outlineG = ((outlineColor >> 8) & 0xFF) / 255F;
         float outlineB = (outlineColor & 0xFF) / 255F;
 
-        VertexConsumer renderBuffer = buffer.getBuffer(RenderType.tripwire());
+        VertexConsumer renderBuffer = contentSource.getBuffer(RenderType.tripwire());
+        // Without a depth test, backdrops must be drawn before what sits in front of them, so they get their own buffer.
+        VertexConsumer backdropBuffer = shaders ? SEE_THROUGH_BACKDROP.get().getBuffer(SeeThroughRenderTypes.QUADS) : renderBuffer;
 
         int packedLight = LightTexture.pack(15, 15);
 
@@ -170,7 +219,7 @@ public class TravelAnchorRenderer implements TravelRenderer<AnchorTravelTarget> 
                 poseStack.scale(scale, scale, scale);
 
                 for (BakedQuad quad : BACKDROP_QUADS.get()) {
-                    renderBuffer.putBulkData(poseStack.last(), quad, outlineR, outlineG, outlineB, 1, packedLight, OverlayTexture.NO_OVERLAY);
+                    backdropBuffer.putBulkData(poseStack.last(), quad, outlineR, outlineG, outlineB, 1, packedLight, OverlayTexture.NO_OVERLAY);
                 }
 
                 poseStack.popPose();
@@ -199,7 +248,7 @@ public class TravelAnchorRenderer implements TravelRenderer<AnchorTravelTarget> 
             BakedModel bakedmodel = minecraft.getItemRenderer().getModel(stack, minecraft.level, null, 0);
             minecraft
                 .getItemRenderer()
-                .render(stack, ItemDisplayContext.GUI, false, poseStack, buffer, packedLight, OverlayTexture.NO_OVERLAY, bakedmodel);
+                .render(stack, ItemDisplayContext.GUI, false, poseStack, contentSource, packedLight, OverlayTexture.NO_OVERLAY, bakedmodel);
 
             float s = 1.5F;
             poseStack.scale(s, s, s);
@@ -207,7 +256,7 @@ public class TravelAnchorRenderer implements TravelRenderer<AnchorTravelTarget> 
             poseStack.rotateAround(Axis.ZN.rotationDegrees(45), 0.5F, 0.5F, 0.5F);
 
             for (BakedQuad quad : BACKDROP_QUADS.get()) {
-                renderBuffer.putBulkData(poseStack.last(), quad, outlineR, outlineG, outlineB, 1, packedLight, OverlayTexture.NO_OVERLAY);
+                backdropBuffer.putBulkData(poseStack.last(), quad, outlineR, outlineG, outlineB, 1, packedLight, OverlayTexture.NO_OVERLAY);
             }
 
             poseStack.popPose();
@@ -261,6 +310,11 @@ public class TravelAnchorRenderer implements TravelRenderer<AnchorTravelTarget> 
             minecraft.font.drawInBatch(textComponent, halfWidth, 0, textColor, false, matrix4f, buffer, mode2, textBg2, packedLight);
 
             poseStack.popPose();
+        }
+
+        if (shaders) {
+            SEE_THROUGH_BACKDROP.get().endBatch();
+            SEE_THROUGH_CONTENT.get().endBatch();
         }
 
         poseStack.popPose();
