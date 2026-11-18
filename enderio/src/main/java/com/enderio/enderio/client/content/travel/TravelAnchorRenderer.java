@@ -18,6 +18,7 @@ import net.minecraft.client.color.block.BlockColors;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.LightTexture;
+import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.block.model.BakedQuad;
 import net.minecraft.client.renderer.texture.OverlayTexture;
@@ -32,7 +33,6 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
-import net.neoforged.neoforge.client.ClientHooks;
 import net.neoforged.neoforge.common.util.Lazy;
 import org.joml.Math;
 import org.joml.Matrix4f;
@@ -40,7 +40,6 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 import java.util.ArrayList;
-import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -91,7 +90,10 @@ public class TravelAnchorRenderer implements TravelRenderer<AnchorTravelTarget> 
             poseStack.translate(-0.5, -0.5, -0.5);
         }
 
-        OutlineBuffer buffer = OutlineBuffer.INSTANCE;
+        // With an Iris shader pack active, anything drawn through the outline buffer still hides what is
+        // behind it but never shows on screen (see #1062), so draw into the normal world buffer instead.
+        // Anchors then no longer show through walls while shaders are on.
+        MultiBufferSource buffer = isShaderPackInUse() ? minecraft.renderBuffers().bufferSource() : OutlineBuffer.INSTANCE;
         int outlineColor = 0xFF0B4D42;
         int textColor = 0xFFFFFFFF;
         if (active) {
@@ -195,15 +197,9 @@ public class TravelAnchorRenderer implements TravelRenderer<AnchorTravelTarget> 
 
             ItemStack stack = travelData.icon().getDefaultInstance();
             BakedModel bakedmodel = minecraft.getItemRenderer().getModel(stack, minecraft.level, null, 0);
-            if (isShaderPackInUse() && !bakedmodel.isCustomRenderer()) {
-                // The item renderer's icon does not show while an Iris shader pack is active (see #1062).
-                // Draw the icon's quads into the same buffer as the backdrop, which does show with shaders.
-                renderIconQuads(stack, bakedmodel, poseStack, renderBuffer, packedLight);
-            } else {
-                minecraft
-                    .getItemRenderer()
-                    .render(stack, ItemDisplayContext.GUI, false, poseStack, OutlineBuffer.INSTANCE, packedLight, OverlayTexture.NO_OVERLAY, bakedmodel);
-            }
+            minecraft
+                .getItemRenderer()
+                .render(stack, ItemDisplayContext.GUI, false, poseStack, buffer, packedLight, OverlayTexture.NO_OVERLAY, bakedmodel);
 
             float s = 1.5F;
             poseStack.scale(s, s, s);
@@ -274,41 +270,5 @@ public class TravelAnchorRenderer implements TravelRenderer<AnchorTravelTarget> 
 
     private static boolean isShaderPackInUse() {
         return ModCompatHelper.hasIris() && IrisApi.getInstance().isShaderPackInUse();
-    }
-
-    // Mirrors ItemRenderer#render for a non-custom model, but writes every quad to the given consumer.
-    private static void renderIconQuads(ItemStack stack, BakedModel model, PoseStack poseStack, VertexConsumer consumer, int packedLight) {
-        Minecraft minecraft = Minecraft.getInstance();
-        poseStack.pushPose();
-
-        BakedModel transformed = ClientHooks.handleCameraTransforms(poseStack, model, ItemDisplayContext.GUI, false);
-        poseStack.translate(-0.5F, -0.5F, -0.5F);
-
-        RandomSource random = RandomSource.create();
-        for (BakedModel pass : transformed.getRenderPasses(stack, true)) {
-            for (Direction direction : Direction.values()) {
-                random.setSeed(42L);
-                putIconQuads(minecraft, stack, pass.getQuads(null, direction, random), poseStack, consumer, packedLight);
-            }
-
-            random.setSeed(42L);
-            putIconQuads(minecraft, stack, pass.getQuads(null, null, random), poseStack, consumer, packedLight);
-        }
-
-        poseStack.popPose();
-    }
-
-    private static void putIconQuads(Minecraft minecraft, ItemStack stack, List<BakedQuad> quads, PoseStack poseStack, VertexConsumer consumer, int packedLight) {
-        for (BakedQuad quad : quads) {
-            float r = 1F, g = 1F, b = 1F;
-            if (quad.isTinted()) {
-                int color = minecraft.getItemColors().getColor(stack, quad.getTintIndex());
-                r = ((color >> 16) & 0xFF) / 255F;
-                g = ((color >> 8) & 0xFF) / 255F;
-                b = (color & 0xFF) / 255F;
-            }
-
-            consumer.putBulkData(poseStack.last(), quad, r, g, b, 1.0F, packedLight, OverlayTexture.NO_OVERLAY);
-        }
     }
 }
